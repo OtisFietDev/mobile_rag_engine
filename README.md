@@ -88,6 +88,29 @@ Tried parallel batch embedding, but `onnxruntime`'s `OrtSession` isn't thread-sa
 
 ### Installation
 
+#### Prerequisites: Rust Environment
+
+This package uses Rust for high-performance tokenization and vector search. **You need to install Rust to build locally.** Once installed, `cargokit` handles the build automatically when you run `flutter run`.
+
+**macOS / Linux:**
+```bash
+# Install Rust via rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**Windows:**
+```powershell
+# Download and run rustup-init.exe from https://rustup.rs
+# Or use winget:
+winget install Rustlang.Rustup
+```
+
+> Required toolchains and targets (iOS/Android) are **automatically installed** by `cargokit` during the first build.
+
+> **Note**: After installing Rust, restart your terminal/IDE for the changes to take effect.
+
+#### Flutter Dependency
+
 ```yaml
 dependencies:
   mobile_rag_engine:
