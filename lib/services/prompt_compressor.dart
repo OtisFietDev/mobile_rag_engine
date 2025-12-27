@@ -2,6 +2,7 @@
 ///
 /// Reduces token count while preserving key information for LLM context.
 /// Uses Rust-based text processing for performance.
+library;
 
 import '../src/rust/api/compression_utils.dart' as rust;
 import '../src/rust/api/source_rag.dart';
@@ -10,10 +11,10 @@ import '../src/rust/api/source_rag.dart';
 enum CompressionLevel {
   /// Minimal compression: remove duplicates only.
   minimal,
-  
+
   /// Balanced compression: remove duplicates + light stopword filtering.
   balanced,
-  
+
   /// Aggressive compression: full stopword removal + sentence pruning.
   aggressive,
 }
@@ -22,19 +23,19 @@ enum CompressionLevel {
 class CompressedContext {
   /// The compressed text for LLM input.
   final String text;
-  
+
   /// Original character count before compression.
   final int originalChars;
-  
+
   /// Character count after compression.
   final int compressedChars;
-  
+
   /// Compression ratio (0.0 - 1.0, lower = more compressed).
   final double ratio;
-  
+
   /// Estimated token savings.
   final int estimatedTokensSaved;
-  
+
   /// Chunks included in the context.
   final List<ChunkSearchResult> includedChunks;
 
@@ -48,13 +49,14 @@ class CompressedContext {
   });
 
   @override
-  String toString() => 'CompressedContext('
+  String toString() =>
+      'CompressedContext('
       'ratio: ${(ratio * 100).toStringAsFixed(1)}%, '
       'saved: ~$estimatedTokensSaved tokens)';
 }
 
 /// Prompt compression service using REFRAG principles.
-/// 
+///
 /// Phase 1: Rule-based compression (stopwords, duplicates)
 /// Phase 2: Similarity-based sentence selection (future)
 class PromptCompressor {
@@ -95,7 +97,7 @@ class PromptCompressor {
 
     // Create compression options
     final options = rust.CompressionOptions(
-      removeStopwords: false,  // Disabled - damages context
+      removeStopwords: false, // Disabled - damages context
       removeDuplicates: true,
       language: language,
       level: levelInt,
@@ -191,11 +193,13 @@ class PromptCompressor {
       return sentences
           .asMap()
           .entries
-          .map((e) => ScoredSentence(
-                sentence: e.value,
-                similarity: 1.0,
-                index: e.key,
-              ))
+          .map(
+            (e) => ScoredSentence(
+              sentence: e.value,
+              similarity: 1.0,
+              index: e.key,
+            ),
+          )
           .toList();
     }
 
@@ -210,11 +214,13 @@ class PromptCompressor {
         final similarity = _cosineSimilarity(queryEmbedding, sentenceEmbedding);
 
         if (similarity >= minSimilarity) {
-          scored.add(ScoredSentence(
-            sentence: sentence,
-            similarity: similarity,
-            index: i,
-          ));
+          scored.add(
+            ScoredSentence(
+              sentence: sentence,
+              similarity: similarity,
+              index: i,
+            ),
+          );
         }
       } catch (e) {
         // Skip sentences that fail to embed
@@ -281,7 +287,7 @@ class PromptCompressor {
 
     // Step 4: Apply Phase 1 compression on selected text
     final options = rust.CompressionOptions(
-      removeStopwords: false,  // Disabled - damages context
+      removeStopwords: false, // Disabled - damages context
       removeDuplicates: true,
       language: language,
       level: level.index,
@@ -344,7 +350,9 @@ class PromptCompressor {
   }
 
   /// Set embedding service instance (call this during app initialization)
-  static void setEmbeddingService(Future<List<double>> Function(String) service) {
+  static void setEmbeddingService(
+    Future<List<double>> Function(String) service,
+  ) {
     _embeddingServiceInstance = service;
   }
 
@@ -369,7 +377,8 @@ class ScoredSentence {
   });
 
   @override
-  String toString() => 'ScoredSentence(sim: ${similarity.toStringAsFixed(3)}, "$sentence")';
+  String toString() =>
+      'ScoredSentence(sim: ${similarity.toStringAsFixed(3)}, "$sentence")';
 }
 
 /// Helper: sqrt function

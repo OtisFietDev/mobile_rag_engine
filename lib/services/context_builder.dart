@@ -2,6 +2,7 @@
 ///
 /// ContextBuilder takes search results and assembles them into
 /// an optimized context string within a token budget.
+library;
 
 import '../src/rust/api/source_rag.dart';
 import '../src/rust/api/compression_utils.dart' as compression;
@@ -10,13 +11,13 @@ import '../src/rust/api/compression_utils.dart' as compression;
 class AssembledContext {
   /// The combined text of all selected chunks.
   final String text;
-  
+
   /// Chunks that were included in the context.
   final List<ChunkSearchResult> includedChunks;
-  
+
   /// Approximate token count used.
   final int estimatedTokens;
-  
+
   /// Tokens remaining from budget.
   final int remainingBudget;
 
@@ -28,17 +29,18 @@ class AssembledContext {
   });
 
   @override
-  String toString() => 'AssembledContext(${includedChunks.length} chunks, ~$estimatedTokens tokens)';
+  String toString() =>
+      'AssembledContext(${includedChunks.length} chunks, ~$estimatedTokens tokens)';
 }
 
 /// Strategy for selecting and ordering chunks.
 enum ContextStrategy {
   /// Include highest similarity chunks first until budget exhausted.
   relevanceFirst,
-  
+
   /// Ensure diversity by not including chunks from same source consecutively.
   diverseSources,
-  
+
   /// Order by chunk index within each source (maintains document order).
   chronological,
 }
@@ -90,7 +92,8 @@ class ContextBuilder {
 
     for (final chunk in orderedResults) {
       final chunkTokens = (chunk.content.length / 4).ceil();
-      final totalIfAdded = usedTokens + chunkTokens + (selected.isEmpty ? 0 : separatorTokens);
+      final totalIfAdded =
+          usedTokens + chunkTokens + (selected.isEmpty ? 0 : separatorTokens);
 
       if (totalIfAdded <= tokenBudget) {
         selected.add(chunk);
@@ -101,7 +104,11 @@ class ContextBuilder {
     }
 
     // Build final text - group by source with clear headers (skip headers in singleSourceMode)
-    final text = _buildGroupedText(selected, separator, skipHeaders: singleSourceMode);
+    final text = _buildGroupedText(
+      selected,
+      separator,
+      skipHeaders: singleSourceMode,
+    );
 
     return AssembledContext(
       text: text,
@@ -113,13 +120,15 @@ class ContextBuilder {
 
   /// Filter to only chunks from the most relevant source.
   /// Most relevant = source with highest total similarity score from top chunks.
-  static List<ChunkSearchResult> _filterToMostRelevantSource(List<ChunkSearchResult> results) {
+  static List<ChunkSearchResult> _filterToMostRelevantSource(
+    List<ChunkSearchResult> results,
+  ) {
     if (results.isEmpty) return results;
 
     // Count chunks and sum scores by source
     final sourceScores = <int, double>{};
     final sourceChunkCounts = <int, int>{};
-    
+
     for (final chunk in results) {
       final sourceId = chunk.sourceId.toInt();
       sourceScores[sourceId] = (sourceScores[sourceId] ?? 0) + chunk.similarity;
@@ -144,7 +153,7 @@ class ContextBuilder {
 
   /// Build text grouped by source with clear document headers.
   static String _buildGroupedText(
-    List<ChunkSearchResult> chunks, 
+    List<ChunkSearchResult> chunks,
     String separator, {
     bool skipHeaders = false,
   }) {
@@ -165,7 +174,7 @@ class ContextBuilder {
     // Build text with document headers (or without if skipHeaders)
     final buffer = StringBuffer();
     var isFirst = true;
-    
+
     for (final entry in bySource.entries) {
       if (!isFirst) {
         buffer.write('\n\n========== DIFFERENT DOCUMENT ==========\n\n');
@@ -181,15 +190,19 @@ class ContextBuilder {
   }
 
   /// Diversify by avoiding consecutive chunks from same source.
-  static List<ChunkSearchResult> _diversifySources(List<ChunkSearchResult> results) {
+  static List<ChunkSearchResult> _diversifySources(
+    List<ChunkSearchResult> results,
+  ) {
     final diverse = <ChunkSearchResult>[];
     final remaining = List<ChunkSearchResult>.from(results);
     int? lastSourceId;
 
     while (remaining.isNotEmpty) {
       // Find next chunk not from last source
-      final idx = remaining.indexWhere((r) => r.sourceId.toInt() != lastSourceId);
-      
+      final idx = remaining.indexWhere(
+        (r) => r.sourceId.toInt() != lastSourceId,
+      );
+
       if (idx >= 0) {
         diverse.add(remaining.removeAt(idx));
         lastSourceId = diverse.last.sourceId.toInt();
@@ -204,7 +217,9 @@ class ContextBuilder {
   }
 
   /// Order by source ID then chunk index (maintains document order).
-  static List<ChunkSearchResult> _orderChronologically(List<ChunkSearchResult> results) {
+  static List<ChunkSearchResult> _orderChronologically(
+    List<ChunkSearchResult> results,
+  ) {
     final sorted = List<ChunkSearchResult>.from(results);
     sorted.sort((a, b) {
       final sourceCompare = a.sourceId.compareTo(b.sourceId);
@@ -215,7 +230,7 @@ class ContextBuilder {
   }
 
   /// Format context for LLM prompt.
-  /// 
+  ///
   /// Creates a prompt that instructs the LLM to answer based ONLY on
   /// the provided documents. Uses bilingual instructions for better
   /// compliance with smaller models.
@@ -223,18 +238,20 @@ class ContextBuilder {
     required String query,
     required AssembledContext context,
     String? systemInstruction,
-    bool useStrictMode = true,  // Strict mode instructs LLM to ONLY use documents
+    bool useStrictMode =
+        true, // Strict mode instructs LLM to ONLY use documents
   }) {
     if (context.text.isEmpty) {
       return query;
     }
 
     // Default instruction: bilingual for better model understanding
-    final instruction = systemInstruction ?? 
-      (useStrictMode 
-        ? '아래 문서 내용만을 참고하여 질문에 답변하세요. 문서에 없는 내용은 "문서에서 해당 정보를 찾을 수 없습니다"라고 답변하세요.\n'
-          'Answer the question based ONLY on the documents below. If the information is not in the documents, say so.'
-        : '아래 문서를 참고하여 답변하세요.\nAnswer based on the following documents:');
+    final instruction =
+        systemInstruction ??
+        (useStrictMode
+            ? '아래 문서 내용만을 참고하여 질문에 답변하세요. 문서에 없는 내용은 "문서에서 해당 정보를 찾을 수 없습니다"라고 답변하세요.\n'
+                  'Answer the question based ONLY on the documents below. If the information is not in the documents, say so.'
+            : '아래 문서를 참고하여 답변하세요.\nAnswer based on the following documents:');
 
     return '''$instruction
 
@@ -312,23 +329,22 @@ ${context.text}
   ) async {
     // Combine text from chunks
     final combinedText = chunks.map((c) => c.content).join('\n\n');
-    
+
     // Apply compression
     final maxChars = tokenBudget * 4; // Rough token to char conversion
     final options = compression.CompressionOptions(
-      removeStopwords: false,  // Disabled - damages context
+      removeStopwords: false, // Disabled - damages context
       removeDuplicates: true,
       language: language,
       level: level,
     );
-    
+
     final result = await compression.compressText(
       text: combinedText,
       maxChars: maxChars,
       options: options,
     );
-    
+
     return result.text;
   }
 }
-

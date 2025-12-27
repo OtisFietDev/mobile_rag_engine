@@ -6,6 +6,7 @@
 /// - Rust source_rag APIs for storage and search
 /// - ContextBuilder for LLM context assembly
 /// - Hybrid search combining vector and BM25 keyword search
+library;
 
 import 'dart:typed_data';
 import '../src/rust/api/source_rag.dart';
@@ -33,23 +34,20 @@ class SourceAddResult {
 class RagSearchResult {
   /// Individual chunk results.
   final List<ChunkSearchResult> chunks;
-  
+
   /// Assembled context for LLM.
   final AssembledContext context;
 
-  RagSearchResult({
-    required this.chunks,
-    required this.context,
-  });
+  RagSearchResult({required this.chunks, required this.context});
 }
 
 /// High-level service for source-based RAG operations.
 class SourceRagService {
   final String dbPath;
-  
+
   /// Maximum characters per chunk (default: 500)
   final int maxChunkChars;
-  
+
   /// Overlap characters between chunks for context continuity
   final int overlapChars;
 
@@ -97,7 +95,7 @@ class SourceRagService {
       maxChars: maxChunkChars,
       overlapChars: overlapChars,
     );
-    
+
     if (chunks.isEmpty) {
       return SourceAddResult(
         sourceId: sourceResult.sourceId.toInt(),
@@ -109,22 +107,24 @@ class SourceRagService {
 
     // 3. Generate embeddings for each chunk
     final chunkDataList = <ChunkData>[];
-    
+
     for (var i = 0; i < chunks.length; i++) {
       onProgress?.call(i, chunks.length);
-      
+
       final chunk = chunks[i];
       final embedding = await EmbeddingService.embed(chunk.content);
-      
-      chunkDataList.add(ChunkData(
-        content: chunk.content,
-        chunkIndex: chunk.index,
-        startPos: chunk.startPos,
-        endPos: chunk.endPos,
-        embedding: Float32List.fromList(embedding),
-      ));
+
+      chunkDataList.add(
+        ChunkData(
+          content: chunk.content,
+          chunkIndex: chunk.index,
+          startPos: chunk.startPos,
+          endPos: chunk.endPos,
+          embedding: Float32List.fromList(embedding),
+        ),
+      );
     }
-    
+
     onProgress?.call(chunks.length, chunks.length);
 
     // 4. Store chunks
@@ -148,7 +148,7 @@ class SourceRagService {
   }
 
   /// Search for relevant chunks and assemble context for LLM.
-  /// 
+  ///
   /// [adjacentChunks] - Number of adjacent chunks to include before/after each
   /// matched chunk (default: 0). Setting this to 1 will include the chunk
   /// before and after each matched chunk, helping with long articles.
@@ -187,13 +187,10 @@ class SourceRagService {
       searchResults: chunks,
       tokenBudget: tokenBudget,
       strategy: strategy,
-      singleSourceMode: singleSourceMode,  // Pass through to skip headers
+      singleSourceMode: singleSourceMode, // Pass through to skip headers
     );
 
-    return RagSearchResult(
-      chunks: chunks,
-      context: context,
-    );
+    return RagSearchResult(chunks: chunks, context: context);
   }
 
   /// Filter to only chunks from the most relevant source.
@@ -206,30 +203,34 @@ class SourceRagService {
 
     // Extract key phrases from query (look for patterns like "제 X 조 (내용)")
     final queryLower = query.toLowerCase();
-    
+
     // First: Try to find source that contains the exact query text
-    final sourceTextMatches = <int, int>{};  // sourceId -> match count
-    
+    final sourceTextMatches = <int, int>{}; // sourceId -> match count
+
     for (final chunk in results) {
       final sourceId = chunk.sourceId.toInt();
       final contentLower = chunk.content.toLowerCase();
-      
+
       // Check if chunk contains significant part of query
       // Split query into meaningful segments and check for matches
-      final queryWords = query.split(RegExp(r'[\s\(\)]+')).where((w) => w.length > 2).toList();
+      final queryWords = query
+          .split(RegExp(r'[\s\(\)]+'))
+          .where((w) => w.length > 2)
+          .toList();
       int matchCount = 0;
       for (final word in queryWords) {
         if (contentLower.contains(word.toLowerCase())) {
           matchCount++;
         }
       }
-      
+
       // Bonus for exact phrase match
       if (contentLower.contains(queryLower) || chunk.content.contains(query)) {
-        matchCount += 100;  // Strong bonus for exact match
+        matchCount += 100; // Strong bonus for exact match
       }
-      
-      sourceTextMatches[sourceId] = (sourceTextMatches[sourceId] ?? 0) + matchCount;
+
+      sourceTextMatches[sourceId] =
+          (sourceTextMatches[sourceId] ?? 0) + matchCount;
     }
 
     // Find source with highest text match count
@@ -244,7 +245,9 @@ class SourceRagService {
 
     // If we have a source with good text matches, use it
     if (bestSourceByText != null && bestTextMatchCount > 0) {
-      return results.where((c) => c.sourceId.toInt() == bestSourceByText).toList();
+      return results
+          .where((c) => c.sourceId.toInt() == bestSourceByText)
+          .toList();
     }
 
     // Fallback: Sum similarity scores by source
@@ -276,25 +279,25 @@ class SourceRagService {
     int adjacentCount,
   ) async {
     final expandedMap = <String, ChunkSearchResult>{};
-    
+
     // Add original chunks first (keyed by sourceId:chunkIndex)
     for (final chunk in chunks) {
       final key = '${chunk.sourceId}:${chunk.chunkIndex}';
       expandedMap[key] = chunk;
     }
-    
+
     // Fetch adjacent chunks for each matched chunk
     for (final chunk in chunks) {
       final minIndex = (chunk.chunkIndex - adjacentCount).clamp(0, 999999);
       final maxIndex = chunk.chunkIndex + adjacentCount;
-      
+
       final adjacent = await getAdjacentChunks(
         dbPath: dbPath,
         sourceId: chunk.sourceId,
         minIndex: minIndex,
         maxIndex: maxIndex,
       );
-      
+
       for (final adj in adjacent) {
         final key = '${adj.sourceId}:${adj.chunkIndex}';
         if (!expandedMap.containsKey(key)) {
@@ -302,7 +305,7 @@ class SourceRagService {
         }
       }
     }
-    
+
     // Sort by sourceId then chunkIndex for coherent reading order
     final result = expandedMap.values.toList();
     result.sort((a, b) {
@@ -310,7 +313,7 @@ class SourceRagService {
       if (sourceCompare != 0) return sourceCompare;
       return a.chunkIndex.compareTo(b.chunkIndex);
     });
-    
+
     return result;
   }
 
@@ -391,13 +394,17 @@ class SourceRagService {
 
     // 2. Convert to ChunkSearchResult format for context building
     // Note: Hybrid search returns content directly, so we create minimal chunks
-    final chunks = hybridResults.map((r) => ChunkSearchResult(
-      chunkId: r.docId,
-      sourceId: r.docId,  // Same as chunk ID for simple docs
-      content: r.content,
-      chunkIndex: 0,
-      similarity: r.score,  // RRF score as similarity
-    )).toList();
+    final chunks = hybridResults
+        .map(
+          (r) => ChunkSearchResult(
+            chunkId: r.docId,
+            sourceId: r.docId, // Same as chunk ID for simple docs
+            content: r.content,
+            chunkIndex: 0,
+            similarity: r.score, // RRF score as similarity
+          ),
+        )
+        .toList();
 
     // 3. Assemble context
     final context = ContextBuilder.build(
@@ -406,10 +413,6 @@ class SourceRagService {
       strategy: strategy,
     );
 
-    return RagSearchResult(
-      chunks: chunks,
-      context: context,
-    );
+    return RagSearchResult(chunks: chunks, context: context);
   }
 }
-

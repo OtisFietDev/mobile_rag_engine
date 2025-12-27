@@ -39,7 +39,7 @@
 /// final prompt = rag.formatPrompt("query", result);
 /// // Send prompt to LLM
 /// ```
-library mobile_rag_engine;
+library;
 
 // Core RAG functions (simple API)
 export 'src/rust/api/simple_rag.dart';
