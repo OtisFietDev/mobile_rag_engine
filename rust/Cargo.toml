@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 flutter_rust_bridge = "=2.11.1"
 anyhow = "1.0.100"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 ndarray = "0.17.1"
 log = "0.4.29"
 once_cell = "1.21"
@@ -19,14 +19,17 @@ once_cell = "1.21"
 tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex", "http"] }
 
 # HNSW vector indexing for O(log n) search
-instant-distance = "0.6"
+hnsw_rs = "0.3"
+
+# Serialization for saving/loading index
+serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 
 # Content hash for deduplication
 sha2 = "0.10"
 
 # Semantic text splitting with Unicode sentence/word boundaries
-text-splitter = { version = "0.28", default-features = false }
+text-splitter = { version = "0.29.3", default-features = false }
 
 # ort 크레이트 제거: iOS에서 libonnxruntime.dylib 로딩 실패
 # ONNX 추론은 Flutter onnxruntime 패키지로 이동

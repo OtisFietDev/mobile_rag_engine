@@ -7,7 +7,10 @@ use rusqlite::{params, Connection};
 use ndarray::Array1;
 use log::info;
 use sha2::{Sha256, Digest};
-use crate::api::hnsw_index::{build_hnsw_index, search_hnsw, is_hnsw_index_loaded};
+use crate::api::hnsw_index::{
+    build_hnsw_index, search_hnsw, is_hnsw_index_loaded, 
+    save_hnsw_index, load_hnsw_index
+};
 
 /// Calculate SHA256 hash
 fn hash_content(content: &str) -> String {
@@ -165,21 +168,25 @@ pub fn add_chunks(
     Ok(chunks.len() as i32)
 }
 
-/// Rebuild HNSW index from chunks table.
+/// Rebuild HNSW index from chunks table and save to disk.
 pub fn rebuild_chunk_hnsw_index(db_path: String) -> anyhow::Result<()> {
     info!("[rebuild_chunk_hnsw] Starting");
     let conn = Connection::open(&db_path)?;
     
     let mut stmt = conn.prepare("SELECT id, embedding FROM chunks")?;
     
+    // Stream through iterator, direct convert to Vectors for build_hnsw_index
     let points: Vec<(i64, Vec<f32>)> = stmt.query_map([], |row| {
         let id: i64 = row.get(0)?;
+        // Avoid potentially expensive intermediate copying if possible, 
+        // essentially just reading BLOB to Vec<u8> then to Vec<f32>
         let embedding_blob: Vec<u8> = row.get(1)?;
         
-        let embedding: Vec<f32> = embedding_blob
-            .chunks(4)
-            .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
-            .collect();
+        // Exact size allocation
+        let mut embedding = Vec::with_capacity(embedding_blob.len() / 4);
+        for chunk in embedding_blob.chunks_exact(4) {
+            embedding.push(f32::from_ne_bytes(chunk.try_into().unwrap()));
+        }
         
         Ok((id, embedding))
     })?
@@ -188,7 +195,12 @@ pub fn rebuild_chunk_hnsw_index(db_path: String) -> anyhow::Result<()> {
     
     if !points.is_empty() {
         build_hnsw_index(points)?;
-        info!("[rebuild_chunk_hnsw] Built index with {} chunks", stmt.column_count());
+        
+        // Save index immediately after building
+        let index_path = format!("{}.hnsw", db_path);
+        save_hnsw_index(&index_path)?;
+        
+        info!("[rebuild_chunk_hnsw] Built & Saved index");
     }
     
     Ok(())
@@ -213,8 +225,15 @@ pub fn search_chunks(
     info!("[search_chunks] Searching, top_k={}", top_k);
     
     if !is_hnsw_index_loaded() {
-        // Try to build index
-        rebuild_chunk_hnsw_index(db_path.clone())?;
+        // Try loading from disk first
+        let index_path = format!("{}.hnsw", db_path);
+        let loaded = load_hnsw_index(&index_path).unwrap_or(false);
+        
+        if !loaded {
+             // Fallback to build if load fails or file missing
+            info!("[search_chunks] Index load failed/missing. Rebuilding.");
+            rebuild_chunk_hnsw_index(db_path.clone())?;
+        }
     }
     
     if !is_hnsw_index_loaded() {
