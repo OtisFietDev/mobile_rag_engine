@@ -61,3 +61,13 @@ macos/
 
 # test_app/
 platform-build/
+
+# Large embedding models (download via download_models.sh)
+assets/bge-m3-int8.onnx
+assets/bge-m3-tokenizer.json
+**/assets/bge-m3-int8.onnx
+**/assets/bge-m3-tokenizer.json
+
+# Python venv
+.venv/
+bge-m3-temp/

@@ -32,10 +32,9 @@ class EmbeddingService {
       print('[DEBUG] Token IDs: $tokenIds (length: ${tokenIds.length})');
     }
 
-    // 2. Generate attention_mask and token_type_ids
+    // 2. Generate attention_mask
     final seqLen = tokenIds.length;
     final attentionMask = List<int>.filled(seqLen, 1);
-    final tokenTypeIds = List<int>.filled(seqLen, 0);
 
     // 3. Create ONNX input tensors
     final inputIdsData = Int64List.fromList(
@@ -43,9 +42,6 @@ class EmbeddingService {
     );
     final attentionMaskData = Int64List.fromList(
       attentionMask.map((e) => e.toInt()).toList(),
-    );
-    final tokenTypeIdsData = Int64List.fromList(
-      tokenTypeIds.map((e) => e.toInt()).toList(),
     );
 
     final shape = [1, seqLen];
@@ -58,16 +54,11 @@ class EmbeddingService {
       attentionMaskData,
       shape,
     );
-    final tokenTypeIdsTensor = OrtValueTensor.createTensorWithDataList(
-      tokenTypeIdsData,
-      shape,
-    );
 
-    // 4. Run inference
+    // 4. Run inference (BGE-m3 doesn't use token_type_ids)
     final inputs = {
       'input_ids': inputIdsTensor,
       'attention_mask': attentionMaskTensor,
-      'token_type_ids': tokenTypeIdsTensor,
     };
 
     final runOptions = OrtRunOptions();
@@ -129,7 +120,6 @@ class EmbeddingService {
     // 6. Release resources
     inputIdsTensor.release();
     attentionMaskTensor.release();
-    tokenTypeIdsTensor.release();
     runOptions.release();
     for (final output in outputs ?? []) {
       output?.release();
