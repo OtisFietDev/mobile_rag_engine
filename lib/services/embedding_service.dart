@@ -43,6 +43,8 @@ class EmbeddingService {
     final attentionMaskData = Int64List.fromList(
       attentionMask.map((e) => e.toInt()).toList(),
     );
+    // BGE-m3 / many modern embedding models do not use token_type_ids
+    // Passing it to a model that doesn't expect it causes an ONNX runtime error.
 
     final shape = [1, seqLen];
 
@@ -55,10 +57,11 @@ class EmbeddingService {
       shape,
     );
 
-    // 4. Run inference (BGE-m3 doesn't use token_type_ids)
+    // 4. Run inference
     final inputs = {
       'input_ids': inputIdsTensor,
       'attention_mask': attentionMaskTensor,
+      // 'token_type_ids' removed
     };
 
     final runOptions = OrtRunOptions();
