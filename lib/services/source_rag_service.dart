@@ -147,6 +147,45 @@ class SourceRagService {
     await rebuildChunkHnswIndex(dbPath: dbPath);
   }
 
+  /// Regenerate embeddings for all existing chunks using the current model.
+  /// This is needed when the embedding model or tokenizer has been updated.
+  Future<void> regenerateAllEmbeddings({
+    void Function(int done, int total)? onProgress,
+  }) async {
+    // 1. Get all chunk IDs and contents
+    final chunks = await getAllChunkIdsAndContents(dbPath: dbPath);
+    print(
+      '[regenerateAllEmbeddings] Found ${chunks.length} chunks to re-embed',
+    );
+
+    // 2. Re-embed each chunk
+    for (var i = 0; i < chunks.length; i++) {
+      final chunk = chunks[i];
+      final embedding = await EmbeddingService.embed(chunk.content);
+
+      // 3. Update in DB
+      await updateChunkEmbedding(
+        dbPath: dbPath,
+        chunkId: chunk.chunkId,
+        embedding: Float32List.fromList(embedding),
+      );
+
+      onProgress?.call(i + 1, chunks.length);
+
+      // Log progress every 50 chunks
+      if ((i + 1) % 50 == 0) {
+        print('[regenerateAllEmbeddings] Progress: ${i + 1}/${chunks.length}');
+      }
+    }
+
+    print('[regenerateAllEmbeddings] Completed. Rebuilding HNSW index...');
+
+    // 4. Rebuild HNSW index
+    await rebuildIndex();
+
+    print('[regenerateAllEmbeddings] Done!');
+  }
+
   /// Search for relevant chunks and assemble context for LLM.
   ///
   /// [adjacentChunks] - Number of adjacent chunks to include before/after each
@@ -163,6 +202,16 @@ class SourceRagService {
   }) async {
     // 1. Generate query embedding
     final queryEmbedding = await EmbeddingService.embed(query);
+
+    // DEBUG: Log embedding stats
+    final embNorm = queryEmbedding.fold<double>(0, (sum, v) => sum + v * v);
+    print('[DEBUG] Query: "$query"');
+    print(
+      '[DEBUG] Embedding norm: ${embNorm.toStringAsFixed(4)}, dims: ${queryEmbedding.length}',
+    );
+    print(
+      '[DEBUG] First 5 values: ${queryEmbedding.take(5).map((v) => v.toStringAsFixed(4)).toList()}',
+    );
 
     // 2. Search chunks
     var chunks = await searchChunks(

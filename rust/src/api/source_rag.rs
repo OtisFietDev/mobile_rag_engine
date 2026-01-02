@@ -224,6 +224,13 @@ pub fn search_chunks(
 ) -> anyhow::Result<Vec<ChunkSearchResult>> {
     info!("[search_chunks] Searching, top_k={}", top_k);
     
+    // DEBUG: Force linear scan to bypass HNSW for testing
+    const FORCE_LINEAR_SCAN: bool = true;
+    if FORCE_LINEAR_SCAN {
+        info!("[search_chunks] DEBUG: Using linear scan");
+        return search_chunks_linear(&db_path, query_embedding, top_k);
+    }
+    
     if !is_hnsw_index_loaded() {
         // Try loading from disk first
         let index_path = format!("{}.hnsw", db_path);
@@ -423,4 +430,54 @@ pub fn get_source_stats(db_path: String) -> anyhow::Result<SourceStats> {
     let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
     
     Ok(SourceStats { source_count, chunk_count })
+}
+
+/// Chunk info for re-embedding (id and content only).
+#[derive(Debug, Clone)]
+pub struct ChunkForReembedding {
+    pub chunk_id: i64,
+    pub content: String,
+}
+
+/// Get all chunk IDs and contents for re-embedding.
+pub fn get_all_chunk_ids_and_contents(db_path: String) -> anyhow::Result<Vec<ChunkForReembedding>> {
+    info!("[get_all_chunk_ids_and_contents] Starting");
+    let conn = Connection::open(&db_path)?;
+    
+    let mut stmt = conn.prepare("SELECT id, content FROM chunks ORDER BY id")?;
+    
+    let chunks: Vec<ChunkForReembedding> = stmt
+        .query_map([], |row| {
+            Ok(ChunkForReembedding {
+                chunk_id: row.get(0)?,
+                content: row.get(1)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    info!("[get_all_chunk_ids_and_contents] Found {} chunks", chunks.len());
+    Ok(chunks)
+}
+
+/// Update embedding for a single chunk.
+pub fn update_chunk_embedding(
+    db_path: String,
+    chunk_id: i64,
+    embedding: Vec<f32>,
+) -> anyhow::Result<()> {
+    let conn = Connection::open(&db_path)?;
+    
+    // Convert embedding to bytes
+    let mut embedding_bytes: Vec<u8> = Vec::with_capacity(embedding.len() * 4);
+    for f in &embedding {
+        embedding_bytes.extend_from_slice(&f.to_ne_bytes());
+    }
+    
+    conn.execute(
+        "UPDATE chunks SET embedding = ?1 WHERE id = ?2",
+        params![embedding_bytes, chunk_id],
+    )?;
+    
+    Ok(())
 }

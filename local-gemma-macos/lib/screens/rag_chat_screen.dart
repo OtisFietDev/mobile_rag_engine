@@ -10,6 +10,50 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:mobile_rag_engine/mobile_rag_engine.dart';
 import 'package:ollama_dart/ollama_dart.dart';
+import 'dart:convert';
+
+import '../services/topic_suggestion_service.dart';
+
+/// Query intent types for RAG parameter optimization
+enum QueryIntent {
+  summary, // 요약, 정리, 핵심 → 적은 청크, 낮은 토큰
+  definition, // ~란, 뜻, 의미 → 정확한 정의
+  broad, // 전체, 모든, 목록 → 많은 청크
+  detail, // 자세히, 왜, 어떻게 → 중간 청크
+  general, // 기본 질문
+}
+
+/// Analysis result from LLM intent classification
+class QueryAnalysis {
+  final QueryIntent intent;
+  final int adjacentChunks;
+  final int tokenBudget;
+  final int topK;
+  final String refinedQuery; // LLM이 정제한 검색 키워드
+
+  const QueryAnalysis({
+    required this.intent,
+    required this.adjacentChunks,
+    required this.tokenBudget,
+    required this.topK,
+    required this.refinedQuery,
+  });
+
+  /// Default fallback analysis
+  factory QueryAnalysis.defaultFor(String query) {
+    return QueryAnalysis(
+      intent: QueryIntent.general,
+      adjacentChunks: 2,
+      tokenBudget: 2000,
+      topK: 10,
+      refinedQuery: query,
+    );
+  }
+
+  @override
+  String toString() =>
+      'QueryAnalysis(intent: $intent, adjacent: $adjacentChunks, budget: $tokenBudget, topK: $topK, query: "$refinedQuery")';
+}
 
 /// Message model for chat
 class ChatMessage {
@@ -78,6 +122,125 @@ class _RagChatScreenState extends State<RagChatScreen> {
   // Similarity threshold for RAG
   final double _minSimilarityThreshold = 0.35;
 
+  // Topic suggestion service
+  final TopicSuggestionService _topicService = TopicSuggestionService();
+  List<SuggestedQuestion> _suggestedQuestions = [];
+  bool _isLoadingSuggestions = false;
+
+  // UI state for collapsible sections
+  bool _isSuggestionsExpanded = true; // Collapsible suggestions panel
+  final Set<int> _expandedSourceMessages =
+      {}; // Track which messages have sources expanded
+
+  /// Calculate optimal adjacent chunks based on query characteristics.
+  ///
+  /// Returns a higher value for queries that need more context (summaries,
+  /// definitions) and lower for specific short queries.
+  int _calculateAdjacentChunks(String query) {
+    final queryLength = query.length;
+    final queryLower = query.toLowerCase();
+
+    // Keywords indicating need for broader context
+    final broadContextKeywords = ['전체', '요약', '정의', '설명', '개요', '모든', '전반'];
+    final narrowContextKeywords = ['뭐야', '뭔가요', '무엇', '어디', '누가', '언제'];
+
+    // Check for broad context keywords → more adjacent chunks
+    for (final keyword in broadContextKeywords) {
+      if (queryLower.contains(keyword)) {
+        return 4; // 넓은 문맥 필요
+      }
+    }
+
+    // Short specific queries → narrower context
+    if (queryLength < 15) {
+      // Check if it's a simple lookup question
+      for (final keyword in narrowContextKeywords) {
+        if (queryLower.contains(keyword)) {
+          return 1; // 짧고 직접적인 질문
+        }
+      }
+      return 2; // 짧지만 일반적인 질문
+    }
+
+    // Long queries with specific terms → medium context
+    if (queryLength > 50) {
+      return 2; // 긴 질문은 이미 충분한 맥락 포함
+    }
+
+    // Default: balanced context
+    return 2;
+  }
+
+  /// Analyze query intent using LLM to get optimal RAG parameters.
+  /// Returns a QueryAnalysis with intent type and tuned parameters.
+  Future<QueryAnalysis> _analyzeQueryIntent(String query) async {
+    try {
+      final intentStopwatch = Stopwatch()..start();
+
+      // Quick LLM call to classify intent and refine query
+      final response = await _ollamaClient.generateCompletion(
+        request: GenerateCompletionRequest(
+          model: widget.modelName ?? 'gemma3:4b',
+          prompt:
+              '''사용자 질문을 분석하여 JSON으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요.
+
+질문: "$query"
+
+분석 기준:
+- intent: "summary" (요약, 정리, 핵심), "definition" (정의, ~란, 뜻), "broad" (전체, 모든, 목록), "detail" (자세히, 왜, 어떻게), "general" (기타)
+- search_query: 검색에 사용할 핵심 키워드 (조사, 질문 형식 제거)
+
+JSON 형식:
+{"intent": "...", "search_query": "..."}''',
+          options: RequestOptions(
+            temperature: 0.0, // Deterministic for classification
+            numPredict: 100, // Short response expected
+          ),
+        ),
+      );
+
+      intentStopwatch.stop();
+      final responseText = response.response?.trim() ?? '';
+      debugPrint(
+        '🧠 Intent analysis (${intentStopwatch.elapsedMilliseconds}ms): $responseText',
+      );
+
+      // Parse JSON response
+      final jsonMatch = RegExp(r'\{[^}]+\}').firstMatch(responseText);
+      if (jsonMatch != null) {
+        final json = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
+        final intentStr =
+            (json['intent'] as String?)?.toLowerCase() ?? 'general';
+        final searchQuery = (json['search_query'] as String?) ?? query;
+
+        // Map intent string to enum and parameters
+        final (intent, adjacent, budget, topK) = switch (intentStr) {
+          'summary' => (QueryIntent.summary, 1, 1500, 5),
+          'definition' => (QueryIntent.definition, 1, 1000, 5),
+          'broad' => (QueryIntent.broad, 3, 4000, 15),
+          'detail' => (QueryIntent.detail, 2, 2500, 10),
+          _ => (QueryIntent.general, 2, 2000, 10),
+        };
+
+        final analysis = QueryAnalysis(
+          intent: intent,
+          adjacentChunks: adjacent,
+          tokenBudget: budget,
+          topK: topK,
+          refinedQuery: searchQuery,
+        );
+
+        debugPrint('📊 Query Analysis: $analysis');
+        return analysis;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Intent analysis failed: $e');
+    }
+
+    // Fallback to default analysis
+    return QueryAnalysis.defaultFor(query);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -130,6 +293,11 @@ class _RagChatScreenState extends State<RagChatScreen> {
         '• Ask me questions about the documents\n'
         '• ${widget.mockLlm ? "(Mock mode - no LLM)" : "Using Ollama: ${widget.modelName ?? 'default'}"}',
       );
+
+      // Generate topic suggestions if we have documents
+      if (_totalChunks > 0 && !widget.mockLlm) {
+        _generateTopicSuggestions();
+      }
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -152,6 +320,51 @@ class _RagChatScreenState extends State<RagChatScreen> {
     });
   }
 
+  /// Generate topic suggestions from knowledge base
+  Future<void> _generateTopicSuggestions() async {
+    if (_ragService == null || widget.mockLlm) return;
+
+    setState(() => _isLoadingSuggestions = true);
+
+    try {
+      final suggestions = await _topicService.generateSuggestions(
+        ragService: _ragService!,
+        ollamaClient: _ollamaClient,
+        modelName: widget.modelName,
+        maxSuggestions: 3,
+      );
+
+      if (mounted) {
+        setState(() {
+          _suggestedQuestions = suggestions;
+          _isLoadingSuggestions = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Topic suggestion error: $e');
+      if (mounted) {
+        setState(() => _isLoadingSuggestions = false);
+      }
+    }
+  }
+
+  /// Send a suggested question as user message
+  void _sendSuggestedQuestion(SuggestedQuestion question) {
+    // Remove clicked question from list
+    setState(() {
+      _suggestedQuestions.remove(question);
+      _isSuggestionsExpanded = false; // Collapse panel after clicking
+    });
+    _messageController.text = question.question;
+    _sendMessage();
+
+    // Auto-regenerate suggestions when all are used up
+    if (_suggestedQuestions.isEmpty && !widget.mockLlm) {
+      _topicService.invalidateCache();
+      _generateTopicSuggestions();
+    }
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty || !_isInitialized || _isGenerating) return;
@@ -168,16 +381,28 @@ class _RagChatScreenState extends State<RagChatScreen> {
     try {
       final totalStopwatch = Stopwatch()..start();
 
-      // 1. RAG Search with timing
+      // 1. Intent Analysis (LLM 1차 호출)
+      final intentStopwatch = Stopwatch()..start();
+      final queryAnalysis = await _analyzeQueryIntent(text);
+      intentStopwatch.stop();
+      debugPrint(
+        '⏱️ Intent analysis: ${intentStopwatch.elapsedMilliseconds}ms',
+      );
+
+      // 2. RAG Search with analyzed parameters
       final ragStopwatch = Stopwatch()..start();
-      // 벡터 검색 + 인접 청크 포함 + 단일 소스 모드
+      debugPrint(
+        '📐 Using: intent=${queryAnalysis.intent.name}, adjacent=${queryAnalysis.adjacentChunks}, budget=${queryAnalysis.tokenBudget}, topK=${queryAnalysis.topK}',
+      );
+      debugPrint('🔎 Refined query: "${queryAnalysis.refinedQuery}"');
+
       final ragResult = await _ragService!.search(
-        text,
-        topK: 10,
-        tokenBudget: 4000, // 압축 전 더 많은 컨텍스트 수집
+        queryAnalysis.refinedQuery, // LLM이 정제한 검색어 사용
+        topK: queryAnalysis.topK,
+        tokenBudget: queryAnalysis.tokenBudget,
         strategy: ContextStrategy.relevanceFirst,
-        adjacentChunks: 2, // 앞뒤 2개 청크 포함
-        singleSourceMode: true, // 가장 관련 높은 소스만 사용
+        adjacentChunks: queryAnalysis.adjacentChunks,
+        singleSourceMode: false, // Changed: search across all sources
       );
       ragStopwatch.stop();
       final ragSearchTime = ragStopwatch.elapsed;
@@ -384,45 +609,105 @@ $compressedContext''',
       // Build messages
       final messages = <Message>[];
 
-      // 1. System Prompt (Generic strictness instructions, NO context here)
-      messages.add(
-        const Message(
-          role: MessageRole.system,
-          content: '당신은 제공된 문맥만을 기반으로 답변하는 AI 비서입니다. 외부 지식을 사용하지 마세요.',
-        ),
+      // Calculate best similarity score for hybrid mode decision
+      final bestSimilarity = ragResult.chunks.isNotEmpty
+          ? ragResult.chunks
+                .map((c) => c.similarity)
+                .where((s) => s > 0) // Exclude adjacent chunks with 0.0
+                .fold(0.0, (a, b) => a > b ? a : b)
+          : 0.0;
+
+      // Hybrid Mode Thresholds
+      const double hybridThreshold = 0.5; // Use hybrid mode if sim >= 0.5
+      const double strictThreshold = 0.7; // Use strict mode if sim >= 0.7
+
+      final bool useHybridMode =
+          hasRelevantContext && bestSimilarity >= hybridThreshold;
+      final bool useStrictMode =
+          hasRelevantContext && bestSimilarity >= strictThreshold;
+
+      debugPrint(
+        '🎯 Response Mode: ${useStrictMode
+            ? "STRICT"
+            : useHybridMode
+            ? "HYBRID"
+            : "FALLBACK"} '
+        '(bestSim: ${bestSimilarity.toStringAsFixed(3)})',
       );
 
-      // 2. Chat History (last 6 messages to keep context window available for RAG)
-      // Reduced from 10 to 6 to prioritize RAG context.
+      // 1. System Prompt - varies by mode
+      if (useStrictMode) {
+        // High similarity: strict document-only mode
+        messages.add(
+          const Message(
+            role: MessageRole.system,
+            content:
+                '당신은 제공된 문맥을 기반으로 정확하게 답변하는 AI 비서입니다. '
+                '문맥에 있는 정보를 우선하여 답변하세요.',
+          ),
+        );
+      } else if (useHybridMode) {
+        // Medium similarity: hybrid mode (document + Gemma knowledge)
+        messages.add(
+          const Message(
+            role: MessageRole.system,
+            content:
+                '당신은 제공된 문맥과 일반 지식을 결합하여 답변하는 AI 비서입니다. '
+                '문맥의 정보를 우선하되, 필요시 일반 지식으로 보완하세요. '
+                '단, 문맥에서 온 정보와 일반 지식을 구분하여 설명하세요.',
+          ),
+        );
+      } else {
+        // No relevant context
+        messages.add(
+          const Message(
+            role: MessageRole.system,
+            content: '당신은 도움이 되는 AI 비서입니다.',
+          ),
+        );
+      }
+
+      // 2. Chat History (last 6 messages)
       final historyStart = _chatHistory.length > 6
           ? _chatHistory.length - 6
           : 0;
       messages.addAll(_chatHistory.sublist(historyStart));
 
       // 3. Current User Message (WITH RAG CONTEXT)
-      // We inject the context strictly here to force the model to look at it.
       String finalUserContent;
 
-      if (hasRelevantContext && contextText.isNotEmpty) {
+      if (useStrictMode) {
+        // High similarity: strict mode
         finalUserContent =
             '''
-[문맥 데이터 시작]
+[참고 문서]
 $contextText
-[문맥 데이터 종료]
+[참고 문서 종료]
 
-지시사항:
-위 [문맥 데이터]에 있는 내용만을 바탕으로 답변하세요. 
-내용이 없으면 "제공된 문서에서 정보를 찾을 수 없습니다"라고 답하세요.
+위 문서의 내용을 바탕으로 다음 질문에 답변하세요.
+
+질문: $query''';
+      } else if (useHybridMode) {
+        // Medium similarity: hybrid mode (NotebookLM style)
+        finalUserContent =
+            '''
+[관련 문서]
+$contextText
+[관련 문서 종료]
+
+위 문서에 관련 내용이 있습니다. 문서 내용을 참고하여 답변하되, 
+필요한 경우 일반적인 지식으로 보완해도 됩니다.
+문서에서 직접 확인된 내용과 일반 지식을 구분해서 설명해 주세요.
 
 질문: $query''';
       } else {
-        // Fallback for no context
+        // No relevant context: general knowledge mode
         finalUserContent =
             '''
 질문: $query
 
-지시사항:
-문서에서 관련 정보를 찾을 수 없습니다. 사용자에게 공손하게 문서에 해당 내용이 없다고 답변하세요.''';
+참고: 업로드된 문서에서 직접적으로 관련된 정보를 찾지 못했습니다.
+일반적인 지식으로 답변하되, 더 정확한 정보가 필요하면 관련 문서를 추가해달라고 안내하세요.''';
       }
 
       messages.add(Message(role: MessageRole.user, content: finalUserContent));
@@ -583,6 +868,94 @@ text completions and chat responses.''',
       _addSystemMessage(
         '✅ Added ${samples.length} sample documents with $_totalChunks chunks.',
       );
+
+      // Regenerate topic suggestions with new content
+      if (!widget.mockLlm) {
+        _topicService.invalidateCache();
+        _generateTopicSuggestions();
+      }
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _status = 'Error: $e';
+      });
+    }
+  }
+
+  /// Manually rebuild HNSW index to sync with all chunks in DB.
+  Future<void> _rebuildHnswIndex() async {
+    if (!_isInitialized) return;
+
+    setState(() {
+      _isLoading = true;
+      _status = 'Rebuilding HNSW index...';
+    });
+
+    try {
+      final stopwatch = Stopwatch()..start();
+      await _ragService!.rebuildIndex();
+      stopwatch.stop();
+
+      final stats = await _ragService!.getStats();
+      _totalChunks = stats.chunkCount.toInt();
+
+      setState(() {
+        _isLoading = false;
+        _status =
+            'Index rebuilt in ${stopwatch.elapsedMilliseconds}ms! Chunks: $_totalChunks';
+      });
+
+      _addSystemMessage(
+        '🔄 HNSW 인덱스 재구축 완료!\n'
+        '• 소요 시간: ${stopwatch.elapsedMilliseconds}ms\n'
+        '• 인덱싱된 청크: $_totalChunks개',
+      );
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _status = 'Error rebuilding index: $e';
+      });
+    }
+  }
+
+  /// Regenerate all chunk embeddings using current model.
+  /// This fixes the issue when stored embeddings don't match the current model.
+  Future<void> _regenerateAllEmbeddings() async {
+    if (!_isInitialized) return;
+
+    setState(() {
+      _isLoading = true;
+      _status = 'Regenerating embeddings...';
+    });
+
+    try {
+      final stopwatch = Stopwatch()..start();
+
+      await _ragService!.regenerateAllEmbeddings(
+        onProgress: (done, total) {
+          setState(() {
+            _status = 'Re-embedding: $done/$total';
+          });
+        },
+      );
+
+      stopwatch.stop();
+
+      final stats = await _ragService!.getStats();
+      _totalChunks = stats.chunkCount.toInt();
+
+      setState(() {
+        _isLoading = false;
+        _status =
+            'Embeddings regenerated in ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s!';
+      });
+
+      _addSystemMessage(
+        '🔄 임베딩 재생성 완료!\n'
+        '• 소요 시간: ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}초\n'
+        '• 처리된 청크: $_totalChunks개\n'
+        '• 이제 검색이 정상 작동합니다.',
+      );
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -626,6 +999,12 @@ text completions and chat responses.''',
                 case 'compression_2':
                   setState(() => _compressionLevel = 2);
                   break;
+                case 'rebuild_index':
+                  _rebuildHnswIndex();
+                  break;
+                case 'regenerate_embeddings':
+                  _regenerateAllEmbeddings();
+                  break;
               }
             },
             itemBuilder: (context) => [
@@ -651,6 +1030,24 @@ text completions and chat responses.''',
                 child: ListTile(
                   leading: Icon(Icons.clear_all),
                   title: Text('Clear Chat'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'rebuild_index',
+                child: ListTile(
+                  leading: Icon(Icons.refresh),
+                  title: Text('Rebuild Index'),
+                  subtitle: Text('Sync HNSW with DB'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'regenerate_embeddings',
+                child: ListTile(
+                  leading: Icon(Icons.autorenew),
+                  title: Text('Regenerate Embeddings'),
+                  subtitle: Text('Fix model mismatch'),
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
@@ -745,6 +1142,9 @@ text completions and chat responses.''',
               ),
             ),
 
+          // Suggestion chips (topic-based questions)
+          _buildSuggestionChips(),
+
           // Messages
           Expanded(child: _buildMessageList()),
 
@@ -787,8 +1187,183 @@ text completions and chat responses.''',
     );
   }
 
+  /// Build suggestion chips for topic-based questions (collapsible)
+  Widget _buildSuggestionChips() {
+    if (_isLoadingSuggestions) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '추천 질문 생성 중...',
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_suggestedQuestions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.withValues(alpha: 0.2)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header row (always visible, tappable to expand/collapse)
+          InkWell(
+            onTap: () {
+              setState(() => _isSuggestionsExpanded = !_isSuggestionsExpanded);
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.lightbulb_outline,
+                    size: 16,
+                    color: Colors.amber[700],
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '추천 질문',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey[700],
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  // Question count badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${_suggestedQuestions.length}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.amber[800],
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  // Refresh button
+                  GestureDetector(
+                    onTap: () {
+                      _topicService.invalidateCache();
+                      _generateTopicSuggestions();
+                    },
+                    child: Icon(
+                      Icons.refresh,
+                      size: 16,
+                      color: Colors.grey[500],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Expand/collapse icon
+                  AnimatedRotation(
+                    turns: _isSuggestionsExpanded ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: Icon(
+                      Icons.expand_more,
+                      size: 20,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Expandable content
+          AnimatedCrossFade(
+            firstChild: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: _suggestedQuestions.map((q) {
+                  return ActionChip(
+                    label: Text(
+                      q.question,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: _isGenerating ? Colors.grey : null,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    backgroundColor: _isGenerating
+                        ? Colors.grey.withValues(alpha: 0.2)
+                        : Theme.of(
+                            context,
+                          ).colorScheme.primaryContainer.withValues(alpha: 0.5),
+                    side: BorderSide(
+                      color: _isGenerating
+                          ? Colors.grey.withValues(alpha: 0.3)
+                          : Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: 0.3),
+                    ),
+                    onPressed: _isGenerating
+                        ? null // Disable during generation
+                        : () => _sendSuggestedQuestion(q),
+                  );
+                }).toList(),
+              ),
+            ),
+            secondChild: const SizedBox.shrink(),
+            crossFadeState: _isSuggestionsExpanded
+                ? CrossFadeState.showFirst
+                : CrossFadeState.showSecond,
+            duration: const Duration(milliseconds: 200),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildMessageBubble(ChatMessage message) {
     final isUser = message.isUser;
+    final messageIndex = _messages.indexOf(message);
+    final hasSourceChunks =
+        !isUser &&
+        message.retrievedChunks != null &&
+        message.retrievedChunks!.isNotEmpty;
+    final isSourceExpanded = _expandedSourceMessages.contains(messageIndex);
+
+    // Get best similarity for display
+    double? bestSimilarity;
+    if (hasSourceChunks) {
+      final validSims = message.retrievedChunks!
+          .map((c) => c.similarity)
+          .where((s) => s > 0)
+          .toList();
+      if (validSims.isNotEmpty) {
+        bestSimilarity = validSims.reduce((a, b) => a > b ? a : b);
+      }
+    }
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
@@ -839,6 +1414,111 @@ text completions and chat responses.''',
                     style: const TextStyle(fontSize: 14, color: Colors.black87),
                   ),
                 ),
+
+                // Source chunks section (collapsible) for AI messages
+                if (hasSourceChunks)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.blue.withValues(alpha: 0.2),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Header (always visible)
+                          InkWell(
+                            onTap: () {
+                              setState(() {
+                                if (isSourceExpanded) {
+                                  _expandedSourceMessages.remove(messageIndex);
+                                } else {
+                                  _expandedSourceMessages.add(messageIndex);
+                                }
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.description_outlined,
+                                    size: 14,
+                                    color: Colors.blue[700],
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '참고 문서',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.blue[700],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  // Similarity badge
+                                  if (bestSimilarity != null)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 5,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: _getSimilarityColor(
+                                          bestSimilarity,
+                                        ).withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: Text(
+                                        '${(bestSimilarity * 100).toStringAsFixed(0)}%',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: _getSimilarityColor(
+                                            bestSimilarity,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  const SizedBox(width: 4),
+                                  AnimatedRotation(
+                                    turns: isSourceExpanded ? 0.5 : 0,
+                                    duration: const Duration(milliseconds: 150),
+                                    child: Icon(
+                                      Icons.expand_more,
+                                      size: 16,
+                                      color: Colors.blue[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          // Expandable chunk previews
+                          if (isSourceExpanded)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: _buildChunkPreviews(
+                                  message.retrievedChunks!,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+
                 // Debug info for AI messages
                 if (!isUser && _showDebugInfo && message.tokensUsed != null)
                   Padding(
@@ -882,6 +1562,82 @@ text completions and chat responses.''',
         ],
       ),
     );
+  }
+
+  /// Get color based on similarity score
+  Color _getSimilarityColor(double similarity) {
+    if (similarity >= 0.7) return Colors.green;
+    if (similarity >= 0.5) return Colors.orange;
+    return Colors.red;
+  }
+
+  /// Build chunk preview widgets (top 3 most relevant)
+  List<Widget> _buildChunkPreviews(List<ChunkSearchResult> chunks) {
+    // Sort by similarity (descending) and take top 3
+    final sortedChunks = chunks.where((c) => c.similarity > 0).toList()
+      ..sort((a, b) => b.similarity.compareTo(a.similarity));
+    final topChunks = sortedChunks.take(3).toList();
+
+    return topChunks.map((chunk) {
+      final preview = chunk.content.length > 120
+          ? '${chunk.content.substring(0, 120)}...'
+          : chunk.content;
+
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: _getSimilarityColor(
+                        chunk.similarity,
+                      ).withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      '${(chunk.similarity * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        color: _getSimilarityColor(chunk.similarity),
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    'Chunk #${chunk.chunkId}',
+                    style: TextStyle(fontSize: 9, color: Colors.grey[500]),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                preview.replaceAll('\n', ' '),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey[700],
+                  height: 1.3,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }).toList();
   }
 
   String _formatTime(DateTime timestamp) {
@@ -1054,6 +1810,12 @@ text completions and chat responses.''',
                         _addSystemMessage(
                           '✅ Document added with ${result.chunkCount} chunks.',
                         );
+
+                        // Regenerate topic suggestions with new content
+                        if (!widget.mockLlm) {
+                          _topicService.invalidateCache();
+                          _generateTopicSuggestions();
+                        }
                       } catch (e) {
                         setState(() {
                           _isLoading = false;

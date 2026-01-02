@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `hash_content`, `search_chunks_linear`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Initialize extended database with sources and chunks tables.
 Future<void> initSourceDb({required String dbPath}) =>
@@ -36,7 +36,7 @@ Future<int> addChunks({
   chunks: chunks,
 );
 
-/// Rebuild HNSW index from chunks table.
+/// Rebuild HNSW index from chunks table and save to disk.
 Future<void> rebuildChunkHnswIndex({required String dbPath}) =>
     RustLib.instance.api.crateApiSourceRagRebuildChunkHnswIndex(dbPath: dbPath);
 
@@ -94,6 +94,24 @@ Future<void> deleteSource({
 
 Future<SourceStats> getSourceStats({required String dbPath}) =>
     RustLib.instance.api.crateApiSourceRagGetSourceStats(dbPath: dbPath);
+
+/// Get all chunk IDs and contents for re-embedding.
+Future<List<ChunkForReembedding>> getAllChunkIdsAndContents({
+  required String dbPath,
+}) => RustLib.instance.api.crateApiSourceRagGetAllChunkIdsAndContents(
+  dbPath: dbPath,
+);
+
+/// Update embedding for a single chunk.
+Future<void> updateChunkEmbedding({
+  required String dbPath,
+  required PlatformInt64 chunkId,
+  required List<double> embedding,
+}) => RustLib.instance.api.crateApiSourceRagUpdateChunkEmbedding(
+  dbPath: dbPath,
+  chunkId: chunkId,
+  embedding: embedding,
+);
 
 /// Result of adding a source document.
 class AddSourceResult {
@@ -161,6 +179,25 @@ class ChunkData {
           startPos == other.startPos &&
           endPos == other.endPos &&
           embedding == other.embedding;
+}
+
+/// Chunk info for re-embedding (id and content only).
+class ChunkForReembedding {
+  final PlatformInt64 chunkId;
+  final String content;
+
+  const ChunkForReembedding({required this.chunkId, required this.content});
+
+  @override
+  int get hashCode => chunkId.hashCode ^ content.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChunkForReembedding &&
+          runtimeType == other.runtimeType &&
+          chunkId == other.chunkId &&
+          content == other.content;
 }
 
 /// Search result with chunk and source info.

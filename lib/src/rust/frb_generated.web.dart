@@ -60,6 +60,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChunkData dco_decode_chunk_data(dynamic raw);
 
   @protected
+  ChunkForReembedding dco_decode_chunk_for_reembedding(dynamic raw);
+
+  @protected
   ChunkSearchResult dco_decode_chunk_search_result(dynamic raw);
 
   @protected
@@ -100,6 +103,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChunkData> dco_decode_list_chunk_data(dynamic raw);
+
+  @protected
+  List<ChunkForReembedding> dco_decode_list_chunk_for_reembedding(dynamic raw);
 
   @protected
   List<ChunkSearchResult> dco_decode_list_chunk_search_result(dynamic raw);
@@ -213,6 +219,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChunkData sse_decode_chunk_data(SseDeserializer deserializer);
 
   @protected
+  ChunkForReembedding sse_decode_chunk_for_reembedding(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ChunkSearchResult sse_decode_chunk_search_result(
     SseDeserializer deserializer,
   );
@@ -263,6 +274,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChunkData> sse_decode_list_chunk_data(SseDeserializer deserializer);
+
+  @protected
+  List<ChunkForReembedding> sse_decode_list_chunk_for_reembedding(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ChunkSearchResult> sse_decode_list_chunk_search_result(
@@ -406,6 +422,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_chunk_data(ChunkData self, SseSerializer serializer);
 
   @protected
+  void sse_encode_chunk_for_reembedding(
+    ChunkForReembedding self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_chunk_search_result(
     ChunkSearchResult self,
     SseSerializer serializer,
@@ -471,6 +493,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_chunk_data(
     List<ChunkData> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_chunk_for_reembedding(
+    List<ChunkForReembedding> self,
     SseSerializer serializer,
   );
 
