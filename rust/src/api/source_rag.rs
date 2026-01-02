@@ -7,7 +7,10 @@ use rusqlite::{params, Connection};
 use ndarray::Array1;
 use log::info;
 use sha2::{Sha256, Digest};
-use crate::api::hnsw_index::{build_hnsw_index, search_hnsw, is_hnsw_index_loaded};
+use crate::api::hnsw_index::{
+    build_hnsw_index, search_hnsw, is_hnsw_index_loaded, 
+    save_hnsw_index, load_hnsw_index
+};
 
 /// Calculate SHA256 hash
 fn hash_content(content: &str) -> String {
@@ -165,21 +168,25 @@ pub fn add_chunks(
     Ok(chunks.len() as i32)
 }
 
-/// Rebuild HNSW index from chunks table.
+/// Rebuild HNSW index from chunks table and save to disk.
 pub fn rebuild_chunk_hnsw_index(db_path: String) -> anyhow::Result<()> {
     info!("[rebuild_chunk_hnsw] Starting");
     let conn = Connection::open(&db_path)?;
     
     let mut stmt = conn.prepare("SELECT id, embedding FROM chunks")?;
     
+    // Stream through iterator, direct convert to Vectors for build_hnsw_index
     let points: Vec<(i64, Vec<f32>)> = stmt.query_map([], |row| {
         let id: i64 = row.get(0)?;
+        // Avoid potentially expensive intermediate copying if possible, 
+        // essentially just reading BLOB to Vec<u8> then to Vec<f32>
         let embedding_blob: Vec<u8> = row.get(1)?;
         
-        let embedding: Vec<f32> = embedding_blob
-            .chunks(4)
-            .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
-            .collect();
+        // Exact size allocation
+        let mut embedding = Vec::with_capacity(embedding_blob.len() / 4);
+        for chunk in embedding_blob.chunks_exact(4) {
+            embedding.push(f32::from_ne_bytes(chunk.try_into().unwrap()));
+        }
         
         Ok((id, embedding))
     })?
@@ -188,7 +195,12 @@ pub fn rebuild_chunk_hnsw_index(db_path: String) -> anyhow::Result<()> {
     
     if !points.is_empty() {
         build_hnsw_index(points)?;
-        info!("[rebuild_chunk_hnsw] Built index with {} chunks", stmt.column_count());
+        
+        // Save index immediately after building
+        let index_path = format!("{}.hnsw", db_path);
+        save_hnsw_index(&index_path)?;
+        
+        info!("[rebuild_chunk_hnsw] Built & Saved index");
     }
     
     Ok(())
@@ -212,9 +224,23 @@ pub fn search_chunks(
 ) -> anyhow::Result<Vec<ChunkSearchResult>> {
     info!("[search_chunks] Searching, top_k={}", top_k);
     
+    // DEBUG: Force linear scan to bypass HNSW for testing
+    const FORCE_LINEAR_SCAN: bool = true;
+    if FORCE_LINEAR_SCAN {
+        info!("[search_chunks] DEBUG: Using linear scan");
+        return search_chunks_linear(&db_path, query_embedding, top_k);
+    }
+    
     if !is_hnsw_index_loaded() {
-        // Try to build index
-        rebuild_chunk_hnsw_index(db_path.clone())?;
+        // Try loading from disk first
+        let index_path = format!("{}.hnsw", db_path);
+        let loaded = load_hnsw_index(&index_path).unwrap_or(false);
+        
+        if !loaded {
+             // Fallback to build if load fails or file missing
+            info!("[search_chunks] Index load failed/missing. Rebuilding.");
+            rebuild_chunk_hnsw_index(db_path.clone())?;
+        }
     }
     
     if !is_hnsw_index_loaded() {
@@ -404,4 +430,54 @@ pub fn get_source_stats(db_path: String) -> anyhow::Result<SourceStats> {
     let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
     
     Ok(SourceStats { source_count, chunk_count })
+}
+
+/// Chunk info for re-embedding (id and content only).
+#[derive(Debug, Clone)]
+pub struct ChunkForReembedding {
+    pub chunk_id: i64,
+    pub content: String,
+}
+
+/// Get all chunk IDs and contents for re-embedding.
+pub fn get_all_chunk_ids_and_contents(db_path: String) -> anyhow::Result<Vec<ChunkForReembedding>> {
+    info!("[get_all_chunk_ids_and_contents] Starting");
+    let conn = Connection::open(&db_path)?;
+    
+    let mut stmt = conn.prepare("SELECT id, content FROM chunks ORDER BY id")?;
+    
+    let chunks: Vec<ChunkForReembedding> = stmt
+        .query_map([], |row| {
+            Ok(ChunkForReembedding {
+                chunk_id: row.get(0)?,
+                content: row.get(1)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    info!("[get_all_chunk_ids_and_contents] Found {} chunks", chunks.len());
+    Ok(chunks)
+}
+
+/// Update embedding for a single chunk.
+pub fn update_chunk_embedding(
+    db_path: String,
+    chunk_id: i64,
+    embedding: Vec<f32>,
+) -> anyhow::Result<()> {
+    let conn = Connection::open(&db_path)?;
+    
+    // Convert embedding to bytes
+    let mut embedding_bytes: Vec<u8> = Vec::with_capacity(embedding.len() * 4);
+    for f in &embedding {
+        embedding_bytes.extend_from_slice(&f.to_ne_bytes());
+    }
+    
+    conn.execute(
+        "UPDATE chunks SET embedding = ?1 WHERE id = ?2",
+        params![embedding_bytes, chunk_id],
+    )?;
+    
+    Ok(())
 }

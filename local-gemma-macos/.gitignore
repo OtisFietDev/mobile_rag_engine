@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Large embedding models (download via download_models.sh)
+assets/bge-m3-int8.onnx
+assets/bge-m3-tokenizer.json

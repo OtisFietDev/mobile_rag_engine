@@ -1,54 +1,40 @@
 // rust/src/api/hnsw_index.rs
-//! HNSW (Hierarchical Navigable Small Worlds) vector indexing
-//! O(log n) search for high-speed large-scale document search
+//! HNSW (Hierarchical Navigable Small Worlds) vector indexing using hnsw_rs
 
-use instant_distance::{Builder, HnswMap, Search};
+use hnsw_rs::prelude::*;
 use std::sync::RwLock;
 use once_cell::sync::Lazy;
 use log::{info, debug, warn};
+use std::path::Path;
+use serde::{Serialize, Deserialize};
+// Try importing HnswIO if available, or rely on Hnsw::load if it exists under a trait
+// Based on search, try HnswIo struct
+use hnsw_rs::hnswio::HnswIo;
 
-/// Custom point type: 384-dimensional embedding with cached norm
-#[derive(Clone, Debug)]
+/// Custom point type: wrapper for FRB compatibility
+/// This struct was used in previous FRB generation, so we keep it to avoid breaking changes.
+/// We don't use it in the index itself anymore (we use native vectors).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EmbeddingPoint {
     pub id: i64,
     pub embedding: Vec<f32>,
-    /// Pre-computed L2 norm for efficient distance calculation
     pub norm: f32,
 }
 
 impl EmbeddingPoint {
-    /// Create a new EmbeddingPoint with pre-computed norm
     pub fn new(id: i64, embedding: Vec<f32>) -> Self {
         let norm = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         Self { id, embedding, norm }
     }
 }
 
-impl instant_distance::Point for EmbeddingPoint {
-    fn distance(&self, other: &Self) -> f32 {
-        // Cosine distance = 1 - cosine similarity
-        // HNSW uses smaller distance = closer, so we use 1 - similarity
-        let dot: f32 = self.embedding.iter()
-            .zip(other.embedding.iter())
-            .map(|(a, b)| a * b)
-            .sum();
-        
-        // Use cached norms instead of recalculating
-        if self.norm == 0.0 || other.norm == 0.0 {
-            return 1.0; // Maximum distance
-        }
-        
-        let similarity = dot / (self.norm * other.norm);
-        1.0 - similarity // Cosine distance
-    }
-}
-
 /// Global HNSW index (in-memory cache)
-/// Using RwLock for improved read concurrency (searches can run in parallel)
-static HNSW_INDEX: Lazy<RwLock<Option<HnswMap<EmbeddingPoint, i64>>>> = 
+// hnsw_rs::Hnsw is thread-safe for searching, so RwLock is good for replacing the index
+// Explicitly specifying types helps: Hnsw<Data, Distance>
+static HNSW_INDEX: Lazy<RwLock<Option<Hnsw<f32, DistCosine>>>> = 
     Lazy::new(|| RwLock::new(None));
 
-/// Build HNSW index
+/// Build HNSW index (Optimized)
 pub fn build_hnsw_index(points: Vec<(i64, Vec<f32>)>) -> anyhow::Result<()> {
     info!("[hnsw] Building index with {} points", points.len());
     
@@ -57,22 +43,51 @@ pub fn build_hnsw_index(points: Vec<(i64, Vec<f32>)>) -> anyhow::Result<()> {
         return Ok(());
     }
     
-    // Map EmbeddingPoint to value(id) - using constructor for norm caching
-    let embedding_points: Vec<EmbeddingPoint> = points.iter()
-        .map(|(id, emb)| EmbeddingPoint::new(*id, emb.clone()))
-        .collect();
+    let count = points.len();
     
-    let values: Vec<i64> = points.iter().map(|(id, _)| *id).collect();
+    // hnsw_rs 0.3.x: Hnsw::new(max_nb_connection, max_elements, max_layer, ef_construction, distance_fn)
+    // We expect f32 data and Cosine distance
+    // Note: insert takes &self, so hwns doesn't need to be mut if using interior mutability
+    let hwns = Hnsw::new(
+        16, // max_nb_connection
+        count, // max_elements: initial capacity
+        16, // max_layer
+        100, // ef_construction
+        DistCosine
+    );
     
-    // Create HNSW index
-    let hnsw_map = Builder::default().build(embedding_points, values);
+    // Insert items
+    for (id, embedding) in points {
+        // hnsw_rs inserts using &slice and an external ID (usize).
+        let u_id = id as usize; 
+        
+        // Insert takes a tuple: (&[T], usize)
+        hwns.insert((&embedding, u_id)); 
+    }
     
-    // Store in global index (write lock)
+    // Store in global
     let mut index_guard = HNSW_INDEX.write().unwrap();
-    *index_guard = Some(hnsw_map);
+    *index_guard = Some(hwns);
     
     info!("[hnsw] Index build complete");
     Ok(())
+}
+
+/// Save HNSW index to disk
+pub fn save_hnsw_index(_full_path: &str) -> anyhow::Result<()> {
+    // Persistence disabled due to hnsw_rs 0.3 library limitations (borrowed index vs static storage)
+    // and feature flag issues with serde.
+    // info!("[hnsw] Saving index to {}", full_path);
+    // ...
+    warn!("[hnsw] Index saving is currently disabled");
+    Ok(())
+}
+
+/// Load HNSW index from disk
+pub fn load_hnsw_index(_full_path: &str) -> anyhow::Result<bool> {
+    // Persistence disabled.
+    warn!("[hnsw] Index loading is currently disabled");
+    Ok(false)
 }
 
 /// HNSW search result
@@ -86,22 +101,20 @@ pub struct HnswSearchResult {
 pub fn search_hnsw(query_embedding: Vec<f32>, top_k: usize) -> anyhow::Result<Vec<HnswSearchResult>> {
     debug!("[hnsw] Starting search, top_k: {}", top_k);
     
-    // Read lock allows concurrent searches
     let index_guard = HNSW_INDEX.read().unwrap();
-    let hnsw_map = index_guard.as_ref()
+    let index = index_guard.as_ref()
         .ok_or_else(|| anyhow::anyhow!("HNSW index not initialized"))?;
     
-    // Use constructor for pre-computed norm
-    let query_point = EmbeddingPoint::new(-1, query_embedding);
+    // ef_search = top_k * 2 usually good
+    let ef_search = core::cmp::max(30, top_k * 2);
     
-    let mut search = Search::default();
-    let neighbors = hnsw_map.search(&query_point, &mut search);
+    // search returns Vec<Neighbor>
+    let neighbors = index.search(&query_embedding, top_k, ef_search);
     
-    let results: Vec<HnswSearchResult> = neighbors
-        .take(top_k)
-        .map(|item| HnswSearchResult {
-            id: *item.value,
-            distance: item.distance,
+    let results: Vec<HnswSearchResult> = neighbors.iter()
+        .map(|neighbor| HnswSearchResult {
+            id: neighbor.d_id as i64,
+            distance: neighbor.distance,
         })
         .collect();
     

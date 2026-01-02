@@ -6,12 +6,20 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `distance`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `fmt`
 
-/// Build HNSW index
+/// Build HNSW index (Optimized)
 Future<void> buildHnswIndex({
   required List<(PlatformInt64, Float32List)> points,
 }) => RustLib.instance.api.crateApiHnswIndexBuildHnswIndex(points: points);
+
+/// Save HNSW index to disk
+Future<void> saveHnswIndex({required String fullPath}) =>
+    RustLib.instance.api.crateApiHnswIndexSaveHnswIndex(fullPath: fullPath);
+
+/// Load HNSW index from disk
+Future<bool> loadHnswIndex({required String fullPath}) =>
+    RustLib.instance.api.crateApiHnswIndexLoadHnswIndex(fullPath: fullPath);
 
 /// Search in HNSW index
 Future<List<HnswSearchResult>> searchHnsw({
@@ -30,12 +38,12 @@ Future<bool> isHnswIndexLoaded() =>
 Future<void> clearHnswIndex() =>
     RustLib.instance.api.crateApiHnswIndexClearHnswIndex();
 
-/// Custom point type: 384-dimensional embedding with cached norm
+/// Custom point type: wrapper for FRB compatibility
+/// This struct was used in previous FRB generation, so we keep it to avoid breaking changes.
+/// We don't use it in the index itself anymore (we use native vectors).
 class EmbeddingPoint {
   final PlatformInt64 id;
   final Float32List embedding;
-
-  /// Pre-computed L2 norm for efficient distance calculation
   final double norm;
 
   const EmbeddingPoint({
@@ -45,7 +53,6 @@ class EmbeddingPoint {
   });
 
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
-  /// Create a new EmbeddingPoint with pre-computed norm
   static Future<EmbeddingPoint> newInstance({
     required PlatformInt64 id,
     required List<double> embedding,

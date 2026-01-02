@@ -20,7 +20,7 @@ const BUFFER_THRESHOLD: usize = 100;  // Auto-merge when buffer reaches this siz
 
 /// Global buffer for recent documents (before HNSW merge)
 /// Stores (doc_id, embedding) pairs for linear scan
-static RECENT_BUFFER: Lazy<RwLock<Vec<BufferEntry>>> = 
+static RECENT_BUFFER: Lazy<RwLock<Vec<BufferEntry>>> =
     Lazy::new(|| RwLock::new(Vec::new()));
 
 /// Buffer entry for recent documents
