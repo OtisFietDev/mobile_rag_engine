@@ -55,6 +55,9 @@ class ChatMessage {
   final double? compressionRatio; // 0.0-1.0, lower = more compressed
   final int? originalTokens; // Before compression
 
+  // Animation tracking - mutable to persist across widget rebuilds
+  bool hasAnimated = false;
+
   // Processing metadata for UI display
   final String? queryType; // explanation, definition, factual, etc.
 
@@ -75,5 +78,6 @@ class ChatMessage {
     this.ragSearchTime,
     this.llmGenerationTime,
     this.totalTime,
+    this.hasAnimated = false,
   }) : timestamp = timestamp ?? DateTime.now();
 }

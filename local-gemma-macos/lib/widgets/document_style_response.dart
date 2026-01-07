@@ -31,8 +31,6 @@ class DocumentStyleResponse extends StatefulWidget {
 }
 
 class _DocumentStyleResponseState extends State<DocumentStyleResponse> {
-  bool _animationComplete = false;
-
   @override
   Widget build(BuildContext context) {
     final hasChunks =
@@ -195,15 +193,16 @@ class _DocumentStyleResponseState extends State<DocumentStyleResponse> {
 
   /// Build content with optional streaming animation
   Widget _buildContent() {
-    // Use streaming animation for new messages
-    if (widget.shouldAnimate && !_animationComplete) {
+    // Use streaming animation for new messages that haven't been animated yet
+    if (widget.shouldAnimate && !widget.message.hasAnimated) {
       return StreamingText(
         text: widget.message.content,
         style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.6),
         typingSpeed: const Duration(milliseconds: 15),
         onComplete: () {
           if (mounted) {
-            setState(() => _animationComplete = true);
+            // Mark animation as complete in the model (persists across rebuilds)
+            widget.message.hasAnimated = true;
           }
         },
       );
